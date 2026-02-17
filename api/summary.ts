@@ -7,7 +7,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 interface KoFiData {
-  subscriptions: Record<string, { tier: string; tier_name?: string; ends_at: string }>;
+  subscriptions: Record<
+    string,
+    { tier: string; tier_name?: string; ends_at: string }
+  >;
   donors: { from_name: string; amount: string; currency: string }[];
   cancellations: { from_name: string; tier: string }[];
   refunds: { from_name: string; amount: string; currency: string }[];
@@ -38,10 +41,13 @@ function formatTimeUntil(endsAt: string): string {
   return `${Math.floor(ms / 60000)}min`;
 }
 
-function buildSummaryMessage(data: KoFiData): { flags: number; components: unknown[] } {
-  const lines: string[] = ["## 📊 Resumo Ko-fi", "---"];
+function buildSummaryMessage(data: KoFiData): {
+  flags: number;
+  components: unknown[];
+} {
+  const lines: string[] = [""];
   const tierEntries = Object.entries(data.tierCounts || {}).filter(
-    ([_, c]) => c > 0
+    ([_, c]) => c > 0,
   );
   const totalSubs = tierEntries.reduce((s, [, c]) => s + c, 0);
 
@@ -75,9 +81,12 @@ function buildSummaryMessage(data: KoFiData): { flags: number; components: unkno
   if ((data.cancellations || []).length > 0) {
     lines.push("");
     lines.push("**Cancelamentos recentes:**");
-    data.cancellations.slice(-5).reverse().forEach((c) => {
-      lines.push(`  • ${c.from_name} (${c.tier})`);
-    });
+    data.cancellations
+      .slice(-5)
+      .reverse()
+      .forEach((c) => {
+        lines.push(`  • ${c.from_name} (${c.tier})`);
+      });
   }
 
   if ((data.refunds || []).length > 0) {
@@ -97,8 +106,13 @@ function buildSummaryMessage(data: KoFiData): { flags: number; components: unkno
         components: [
           {
             type: 9,
-            components: [{ type: 10, content: "Resumo de apoiadores" }],
+            components: [{ type: 10, content: "### 📊 Resumo Ko-fi" }],
             accessory: { type: 11, media: { url: KOFI_IMG } },
+          },
+          {
+            type: 14,
+            divider: true,
+            spacing: 2,
           },
           { type: 10, content },
         ],
@@ -110,7 +124,7 @@ function buildSummaryMessage(data: KoFiData): { flags: number; components: unkno
 function buildLegacyEmbedSummary(data: KoFiData): { embeds: unknown[] } {
   const lines: string[] = [];
   const tierEntries = Object.entries(data.tierCounts || {}).filter(
-    ([_, c]) => c > 0
+    ([_, c]) => c > 0,
   );
   const totalSubs = tierEntries.reduce((s, [, c]) => s + c, 0);
 
@@ -123,14 +137,18 @@ function buildLegacyEmbedSummary(data: KoFiData): { embeds: unknown[] } {
   if (subList.length > 0) {
     lines.push("\n**Por usuário:**");
     subList.slice(0, 10).forEach(([name, entry]) => {
-      lines.push(`• ${name} (${entry.tier_name || entry.tier}) → ${formatTimeUntil(entry.ends_at)}`);
+      lines.push(
+        `• ${name} (${entry.tier_name || entry.tier}) → ${formatTimeUntil(entry.ends_at)}`,
+      );
     });
   }
 
   const donors = (data.donors || []).slice(-5).reverse();
   if (donors.length > 0) {
     lines.push("\n**Últimas doações:**");
-    donors.forEach((d) => lines.push(`• ${d.from_name}: ${d.amount} ${d.currency}`));
+    donors.forEach((d) =>
+      lines.push(`• ${d.from_name}: ${d.amount} ${d.currency}`),
+    );
   }
 
   return {
@@ -153,10 +171,7 @@ function webhookUrlWithComponents(url: string): string {
   return u.toString();
 }
 
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST" && req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -177,8 +192,7 @@ export default async function handler(
       ? req.query.token
       : (req.body?.token ?? req.headers["x-summary-token"]);
   const authHeader = req.headers.authorization;
-  const isCronAuth =
-    cronSecret && authHeader === `Bearer ${cronSecret}`;
+  const isCronAuth = cronSecret && authHeader === `Bearer ${cronSecret}`;
   const isTokenAuth = summaryToken && token === summaryToken;
 
   if (!isCronAuth && !isTokenAuth) {
@@ -190,9 +204,9 @@ export default async function handler(
   const gistToken = process.env.GIST_TOKEN;
 
   if (!gistToken || (!gistUrl && !gistIdEnv)) {
-    return res
-      .status(400)
-      .json({ error: "GIST_TOKEN e (GIST_URL ou GIST_ID) obrigatórios para resumo" });
+    return res.status(400).json({
+      error: "GIST_TOKEN e (GIST_URL ou GIST_ID) obrigatórios para resumo",
+    });
   }
 
   if (!webhookSummary || !isValidUrl(webhookSummary)) {
@@ -204,7 +218,9 @@ export default async function handler(
   function getGistId(url?: string, id?: string): string {
     if (id && /^[a-f0-9]+$/i.test(id)) return id;
     if (url) {
-      const m = url.match(/gist\.githubusercontent\.com\/[^/]+\/([a-f0-9]+)\/raw/i);
+      const m = url.match(
+        /gist\.githubusercontent\.com\/[^/]+\/([a-f0-9]+)\/raw/i,
+      );
       if (m) return m[1];
       const m2 = url.match(/gist\.github\.com\/[^/]+\/([a-f0-9]+)/i);
       if (m2) return m2[1];
@@ -220,14 +236,22 @@ export default async function handler(
       gist_id: gistId,
       headers: { "X-GitHub-Api-Version": "2022-11-28" },
     });
-    const files = (res2.data as { files?: Record<string, { content?: string }> }).files;
+    const files = (
+      res2.data as { files?: Record<string, { content?: string }> }
+    ).files;
     const file = files?.["kofi.json"];
     if (!file?.content) {
       throw new Error("Gist sem arquivo kofi.json");
     }
     const parsed = JSON.parse(file.content);
     const data: KoFiData = Array.isArray(parsed)
-      ? { subscriptions: {}, donors: [], cancellations: [], refunds: [], tierCounts: {} }
+      ? {
+          subscriptions: {},
+          donors: [],
+          cancellations: [],
+          refunds: [],
+          tierCounts: {},
+        }
       : {
           subscriptions: parsed.subscriptions || {},
           donors: parsed.donors || [],
