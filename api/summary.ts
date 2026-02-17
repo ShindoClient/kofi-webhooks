@@ -124,19 +124,26 @@ export default async function handler(
   }
 
   const summaryToken = process.env.SUMMARY_TOKEN;
+  const cronSecret = process.env.CRON_SECRET;
   const webhookSummary = process.env.WEBHOOK_SUMMARY || process.env.WEBHOOK_URL;
 
-  if (!summaryToken) {
+  if (!summaryToken && !cronSecret) {
     return res
       .status(400)
-      .json({ error: "SUMMARY_TOKEN não configurado no .env" });
+      .json({ error: "SUMMARY_TOKEN ou CRON_SECRET não configurado" });
   }
 
+  // Auth: token (manual) OU Bearer CRON_SECRET (Vercel Cron)
   const token =
     req.method === "GET"
       ? req.query.token
       : (req.body?.token ?? req.headers["x-summary-token"]);
-  if (token !== summaryToken) {
+  const authHeader = req.headers.authorization;
+  const isCronAuth =
+    cronSecret && authHeader === `Bearer ${cronSecret}`;
+  const isTokenAuth = summaryToken && token === summaryToken;
+
+  if (!isCronAuth && !isTokenAuth) {
     return res.status(401).json({ error: "Token inválido" });
   }
 
