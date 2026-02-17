@@ -176,7 +176,7 @@ function buildComponentsV2Message(
   kind: EventKind,
   kofiUsername?: string
 ): { flags: number; components: Container[] } {
-  const accentColor = tierColor(payload.tier_name);
+  const accentColor = null;
   const kofiLink = kofiUsername
     ? `https://ko-fi.com/${kofiUsername}`
     : "https://ko-fi.com";
