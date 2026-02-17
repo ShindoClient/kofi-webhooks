@@ -156,50 +156,27 @@ function formatTimeUntil(endsAt: string): string {
 // ============ DISCORD COMPONENTS V2 ============
 
 type TextDisplay = { type: 10; content: string };
-type Thumbnail = { type: 11; media: { url: string } };
+type Thumbnail = { type: 11; media: { url: string }; description?: null; spoiler?: boolean };
 type Section = {
   type: 9;
   components: TextDisplay[];
   accessory: Thumbnail;
 };
+type Separator = { type: 14; divider: true; spacing: number };
 type Container = {
   type: 17;
-  components: (TextDisplay | Section)[];
-  accent_color?: number;
+  accent_color: number | null;
+  spoiler: boolean;
+  components: (TextDisplay | Section | Separator)[];
 };
 
-function textDisplay(content: string): TextDisplay {
-  return { type: 10, content };
-}
-
-function thumbnail(url: string): Thumbnail {
-  return { type: 11, media: { url } };
-}
-
-function section(text: string, imgUrl: string): Section {
-  return {
-    type: 9,
-    components: [{ type: 10, content: text }],
-    accessory: thumbnail(imgUrl),
-  };
-}
-
-function container(
-  components: (TextDisplay | Section)[],
-  accentColor?: number
-): Container {
-  const c: Container = { type: 17, components };
-  if (accentColor != null) c.accent_color = accentColor;
-  return c;
-}
-
-/** Monta mensagem Discord usando Components V2 (estilo discord.builders) */
+/** Monta mensagem Discord usando Components V2 (template do usuário) */
 function buildComponentsV2Message(
   payload: KoFiPayload,
   kind: EventKind,
   kofiUsername?: string
-): { flags: number; components: (Section | TextDisplay | Container)[] } {
-  const color = tierColor(payload.tier_name);
+): { flags: number; components: Container[] } {
+  const accentColor = tierColor(payload.tier_name);
   const kofiLink = kofiUsername
     ? `https://ko-fi.com/${kofiUsername}`
     : "https://ko-fi.com";
@@ -208,53 +185,72 @@ function buildComponentsV2Message(
   let subtitle: string;
   switch (kind) {
     case "donation":
-      title = "☕ Nova doação no Ko-fi!";
+      title = "### ☕ Nova doação no Ko-fi!";
       subtitle = "Buy me a coffee ou tip recebido";
       break;
     case "subscription_start":
-      title = "✨ Nova subscription!";
+      title = "### ✨ Nova subscription!";
       subtitle = "Alguém começou a te apoiar mensalmente";
       break;
     case "subscription_renewal":
-      title = "🔄 Renovação de subscription";
+      title = "### 🔄 Renovação de subscription";
       subtitle = "Pagamento mensal renovado";
       break;
     case "cancellation":
-      title = "❌ Subscription cancelada";
+      title = "### ❌ Subscription cancelada";
       subtitle = "Um apoiador cancelou a assinatura";
       break;
     case "refund":
-      title = "💰 Pedido de reembolso";
+      title = "### 💰 Pedido de reembolso";
       subtitle = "Requer atenção";
       break;
     default:
-      title = "📬 Nova notificação Ko-fi";
+      title = "### 📬 Nova notificação Ko-fi";
       subtitle = payload.type || "Evento";
   }
 
-  const parts: (TextDisplay | Section)[] = [
-    textDisplay(`## ${title}\n${subtitle}`),
-    textDisplay("---"),
-    textDisplay(`**De:** ${payload.from_name}`),
-    textDisplay(`**Tipo:** ${payload.type}`),
-    textDisplay(`**Valor:** ${payload.amount} ${payload.currency}`),
+  const containerComponents: (TextDisplay | Section | Separator)[] = [
+    {
+      type: 9,
+      accessory: {
+        type: 11,
+        media: { url: KOFI_IMG },
+        description: null,
+        spoiler: false,
+      },
+      components: [
+        { type: 10, content: title },
+        { type: 10, content: subtitle },
+      ],
+    },
+    { type: 14, divider: true, spacing: 2 },
+    { type: 10, content: `**De:** ${payload.from_name}` },
+    { type: 10, content: `**Tipo:** ${payload.type}` },
+    { type: 10, content: `**Valor:** ${payload.amount} ${payload.currency}` },
   ];
 
   if (payload.tier_name) {
-    parts.push(textDisplay(`**Tier:** ${payload.tier_name}`));
+    containerComponents.push({ type: 10, content: `**Tier:** ${payload.tier_name}` });
   }
   if (payload.message && payload.message !== "null") {
-    parts.push(textDisplay(`**Mensagem:** ${payload.message}`));
+    containerComponents.push({ type: 10, content: `**Mensagem:** ${payload.message}` });
   }
 
-  parts.push(textDisplay(`[Ver no Ko-fi](${kofiLink})`));
-
-  const mainContainer = container(parts, color);
-  const headerSection = section(`Ko-fi • ${payload.type}`, KOFI_IMG);
+  containerComponents.push({
+    type: 10,
+    content: `[Ver no Ko-fi](<${kofiLink}>)`,
+  });
 
   return {
     flags: IS_COMPONENTS_V2,
-    components: [headerSection, mainContainer],
+    components: [
+      {
+        type: 17,
+        accent_color: accentColor,
+        spoiler: false,
+        components: containerComponents,
+      },
+    ],
   };
 }
 
