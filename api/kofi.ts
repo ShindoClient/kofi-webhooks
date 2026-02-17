@@ -1,10 +1,12 @@
 /**
- * Ko-fi Webhook → Discord
+ * Ko-fi Webhook → Discord (Components V2)
  * Adaptado de https://github.com/raidensakura/kofi-discord-notification
- * Para Vercel Serverless Functions (TypeScript)
+ * Usa Discord Components V2: https://docs.discord.com/developers/components/reference
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+
+// ============ TIPOS ============
 
 interface KoFiPayload {
   message_id: string;
@@ -18,10 +20,78 @@ interface KoFiPayload {
   email?: string;
   kofi_transaction_id?: string;
   shipping?: unknown;
+  /** Ko-fi envia para pagamentos de subscription */
+  is_subscription_payment?: boolean;
+  is_first_subscription_payment?: boolean;
+  /** Timestamp no formato ISO ou similar */
+  timestamp?: string;
 }
+
+/** Estado persistido no Gist */
+interface KoFiData {
+  /** Subs ativas: from_name → { tier, starts_at, ends_at, message_id } */
+  subscriptions: Record<string, SubscriptionEntry>;
+  /** Doações one-time (tip, coffee) - não subscription */
+  donors: DonorEntry[];
+  /** Cancelamentos de subscription */
+  cancellations: CancellationEntry[];
+  /** Pedidos de reembolso */
+  refunds: RefundEntry[];
+  /** Estatísticas por tier */
+  tierCounts: Record<string, number>;
+}
+
+interface SubscriptionEntry {
+  tier: string;
+  tier_name?: string;
+  amount: string;
+  currency: string;
+  starts_at: string;
+  ends_at: string;
+  message_id: string;
+  from_name: string;
+}
+
+interface DonorEntry {
+  from_name: string;
+  amount: string;
+  currency: string;
+  message?: string;
+  message_id: string;
+  timestamp: string;
+}
+
+interface CancellationEntry {
+  from_name: string;
+  tier: string;
+  message_id: string;
+  timestamp: string;
+}
+
+interface RefundEntry {
+  from_name: string;
+  amount: string;
+  currency: string;
+  message_id: string;
+  timestamp: string;
+  reason?: string;
+}
+
+type EventKind =
+  | "donation"
+  | "subscription_start"
+  | "subscription_renewal"
+  | "cancellation"
+  | "refund";
+
+// ============ CONSTANTES ============
 
 const CENSOR = "*****";
 const KOFI_IMG = "https://storage.ko-fi.com/cdn/brandasset/v2/kofi_symbol.png";
+const IS_COMPONENTS_V2 = 32768;
+const MS_PER_MONTH = 30 * 24 * 60 * 60 * 1000;
+
+// ============ HELPERS ============
 
 function isValidUrl(s: string): boolean {
   try {
@@ -45,43 +115,160 @@ function tierColor(tier?: string): number {
   }
 }
 
-async function sendDiscordEmbed(
-  webhookUrl: string,
-  payload: KoFiPayload,
-  kofiUsername?: string,
-) {
-  const embed = {
-    author: {
-      name: "Ko-fi",
-      icon_url: KOFI_IMG,
-    },
-    thumbnail: { url: KOFI_IMG },
-    title: "New supporter on Ko-fi ☕",
-    url: kofiUsername ? `https://ko-fi.com/${kofiUsername}` : undefined,
-    color: tierColor(payload.tier_name),
-    fields: [
-      { name: "From", value: payload.from_name, inline: true },
-      { name: "Type", value: payload.type, inline: true },
-      {
-        name: "Amount",
-        value: `${payload.amount} ${payload.currency}`,
-        inline: true,
-      },
-      ...(payload.message && payload.message !== "null"
-        ? [{ name: "Message", value: payload.message, inline: false }]
-        : []),
-    ],
-    footer: {
-      text: "Thank you for supporting us!",
-      icon_url: KOFI_IMG,
-    },
-    timestamp: new Date().toISOString(),
-  };
+/** Garante URL do webhook com suporte a Components V2 */
+function webhookUrlWithComponents(url: string): string {
+  const u = new URL(url);
+  u.searchParams.set("wait", "true");
+  if (!u.searchParams.has("with_components")) {
+    u.searchParams.set("with_components", "true");
+  }
+  return u.toString();
+}
 
-  const res = await fetch(webhookUrl, {
+/** Detecta o tipo de evento do payload */
+function getEventKind(payload: KoFiPayload): EventKind {
+  const type = (payload.type || "").toLowerCase();
+  if (type.includes("cancel") || type.includes("cancelled")) return "cancellation";
+  if (type.includes("refund")) return "refund";
+
+  const isSub = payload.is_subscription_payment === true;
+  const isFirst = payload.is_first_subscription_payment === true;
+
+  if (isSub && isFirst) return "subscription_start";
+  if (isSub && !isFirst) return "subscription_renewal";
+  return "donation";
+}
+
+/** Formata tempo restante até ends_at */
+function formatTimeUntil(endsAt: string): string {
+  const end = new Date(endsAt).getTime();
+  const now = Date.now();
+  const ms = end - now;
+  if (ms <= 0) return "Expirada";
+  const days = Math.floor(ms / (24 * 60 * 60 * 1000));
+  const hours = Math.floor((ms % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h`;
+  const mins = Math.floor(ms / 60000);
+  return `${mins}min`;
+}
+
+// ============ DISCORD COMPONENTS V2 ============
+
+type TextDisplay = { type: 10; content: string };
+type Thumbnail = { type: 11; media: { url: string } };
+type Section = {
+  type: 9;
+  components: TextDisplay[];
+  accessory: Thumbnail;
+};
+type Container = {
+  type: 17;
+  components: (TextDisplay | Section)[];
+  accent_color?: number;
+};
+
+function textDisplay(content: string): TextDisplay {
+  return { type: 10, content };
+}
+
+function thumbnail(url: string): Thumbnail {
+  return { type: 11, media: { url } };
+}
+
+function section(text: string, imgUrl: string): Section {
+  return {
+    type: 9,
+    components: [{ type: 10, content: text }],
+    accessory: thumbnail(imgUrl),
+  };
+}
+
+function container(
+  components: (TextDisplay | Section)[],
+  accentColor?: number
+): Container {
+  const c: Container = { type: 17, components };
+  if (accentColor != null) c.accent_color = accentColor;
+  return c;
+}
+
+/** Monta mensagem Discord usando Components V2 (estilo discord.builders) */
+function buildComponentsV2Message(
+  payload: KoFiPayload,
+  kind: EventKind,
+  kofiUsername?: string
+): { flags: number; components: (Section | TextDisplay | Container)[] } {
+  const color = tierColor(payload.tier_name);
+  const kofiLink = kofiUsername
+    ? `https://ko-fi.com/${kofiUsername}`
+    : "https://ko-fi.com";
+
+  let title: string;
+  let subtitle: string;
+  switch (kind) {
+    case "donation":
+      title = "☕ Nova doação no Ko-fi!";
+      subtitle = "Buy me a coffee ou tip recebido";
+      break;
+    case "subscription_start":
+      title = "✨ Nova subscription!";
+      subtitle = "Alguém começou a te apoiar mensalmente";
+      break;
+    case "subscription_renewal":
+      title = "🔄 Renovação de subscription";
+      subtitle = "Pagamento mensal renovado";
+      break;
+    case "cancellation":
+      title = "❌ Subscription cancelada";
+      subtitle = "Um apoiador cancelou a assinatura";
+      break;
+    case "refund":
+      title = "💰 Pedido de reembolso";
+      subtitle = "Requer atenção";
+      break;
+    default:
+      title = "📬 Nova notificação Ko-fi";
+      subtitle = payload.type || "Evento";
+  }
+
+  const parts: (TextDisplay | Section)[] = [
+    textDisplay(`## ${title}\n${subtitle}`),
+    textDisplay("---"),
+    textDisplay(`**De:** ${payload.from_name}`),
+    textDisplay(`**Tipo:** ${payload.type}`),
+    textDisplay(`**Valor:** ${payload.amount} ${payload.currency}`),
+  ];
+
+  if (payload.tier_name) {
+    parts.push(textDisplay(`**Tier:** ${payload.tier_name}`));
+  }
+  if (payload.message && payload.message !== "null") {
+    parts.push(textDisplay(`**Mensagem:** ${payload.message}`));
+  }
+
+  parts.push(textDisplay(`[Ver no Ko-fi](${kofiLink})`));
+
+  const mainContainer = container(parts, color);
+  const headerSection = section(`Ko-fi • ${payload.type}`, KOFI_IMG);
+
+  return {
+    flags: IS_COMPONENTS_V2,
+    components: [headerSection, textDisplay(""), mainContainer],
+  };
+}
+
+// ============ ENVIO DISCORD ============
+
+async function sendToDiscord(
+  webhookUrl: string,
+  body: { flags: number; components: unknown[] }
+): Promise<void> {
+  const url = webhookUrlWithComponents(webhookUrl);
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ embeds: [embed] }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -90,40 +277,181 @@ async function sendDiscordEmbed(
   }
 }
 
-async function updateGist(
-  gistUrl: string,
-  gistToken: string,
-  supporters: KoFiPayload[],
-  messageId: string,
-): Promise<void> {
-  const match = gistUrl.match(/\/([\da-f]+)\/raw\//);
-  if (!match) throw new Error("Could not get Gist ID from URL.");
+/** Escolhe webhook com base no evento. Fallback para WEBHOOK_URL. */
+function getWebhookForEvent(
+  kind: EventKind,
+  env: {
+    WEBHOOK_URL: string;
+    WEBHOOK_SUBSCRIPTIONS?: string;
+    WEBHOOK_DONATIONS?: string;
+    WEBHOOK_ALERTS?: string;
+  }
+): string {
+  if (kind === "subscription_start" || kind === "subscription_renewal") {
+    return env.WEBHOOK_SUBSCRIPTIONS || env.WEBHOOK_URL;
+  }
+  if (kind === "donation") {
+    return env.WEBHOOK_DONATIONS || env.WEBHOOK_URL;
+  }
+  if (kind === "cancellation" || kind === "refund") {
+    return env.WEBHOOK_ALERTS || env.WEBHOOK_URL;
+  }
+  return env.WEBHOOK_URL;
+}
 
-  const gistId = match[1];
-  const dateString = new Date().toLocaleString();
+// ============ GIST (suporta privado via API) ============
 
+const EMPTY_DATA: KoFiData = {
+  subscriptions: {},
+  donors: [],
+  cancellations: [],
+  refunds: [],
+  tierCounts: {},
+};
+
+/** Extrai o ID do Gist de GIST_URL ou usa GIST_ID direto */
+function getGistId(gistUrl?: string, gistId?: string): string {
+  if (gistId && /^[a-f0-9]+$/i.test(gistId)) return gistId;
+  if (gistUrl) {
+    const rawMatch = gistUrl.match(/gist\.githubusercontent\.com\/[^/]+\/([a-f0-9]+)\/raw/i);
+    if (rawMatch) return rawMatch[1];
+    const shortMatch = gistUrl.match(/gist\.github\.com\/[^/]+\/([a-f0-9]+)/i);
+    if (shortMatch) return shortMatch[1];
+  }
+  throw new Error("GIST_ID ou GIST_URL inválido. Para Gist privado, use GIST_ID.");
+}
+
+/** Carrega dados do Gist via GitHub API (funciona com público e privado) */
+async function loadGistData(
+  gistId: string,
+  gistToken: string
+): Promise<KoFiData> {
   const { Octokit } = await import("@octokit/core");
   const octokit = new Octokit({ auth: gistToken });
+  try {
+    const res = await octokit.request(`GET /gists/${gistId}`, {
+      gist_id: gistId,
+      headers: { "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    const files = (res.data as { files?: Record<string, { content?: string }> })
+      .files;
+    const file = files?.["kofi.json"];
+    if (!file?.content) return { ...EMPTY_DATA };
+    const raw = JSON.parse(file.content);
+    if (Array.isArray(raw)) return { ...EMPTY_DATA };
+    return {
+      subscriptions: raw.subscriptions || {},
+      donors: raw.donors || [],
+      cancellations: raw.cancellations || [],
+      refunds: raw.refunds || [],
+      tierCounts: raw.tierCounts || {},
+    };
+  } catch {
+    return { ...EMPTY_DATA };
+  }
+}
 
-  const gistRes = await octokit.request(`PATCH /gists/${gistId}`, {
+async function saveGistData(
+  gistId: string,
+  gistToken: string,
+  data: KoFiData
+): Promise<void> {
+  const { Octokit } = await import("@octokit/core");
+  const octokit = new Octokit({ auth: gistToken });
+  const res = await octokit.request(`PATCH /gists/${gistId}`, {
     gist_id: gistId,
-    description: `Last updated at ${dateString}`,
+    description: `Ko-fi data - Last updated ${new Date().toISOString()}`,
     files: {
-      "kofi.json": {
-        content: JSON.stringify(supporters),
-      },
+      "kofi.json": { content: JSON.stringify(data, null, 2) },
     },
     headers: { "X-GitHub-Api-Version": "2022-11-28" },
   });
-
-  if (gistRes.status !== 200) {
-    throw new Error(`Update gist failed: ${gistRes.status}`);
+  if (res.status !== 200) {
+    throw new Error(`Update gist failed: ${res.status}`);
   }
-
-  console.log(`Updated gist for payload ${messageId}.`);
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+function applyPayloadToData(
+  data: KoFiData,
+  payload: KoFiPayload,
+  kind: EventKind
+): KoFiData {
+  const next = JSON.parse(JSON.stringify(data)) as KoFiData;
+  const tier = payload.tier_name || payload.type || "Default";
+  const now = payload.timestamp || new Date().toISOString();
+
+  const addOrUpdateSubscription = (isNew: boolean) => {
+    const endsAt = new Date(Date.now() + MS_PER_MONTH).toISOString();
+    next.subscriptions[payload.from_name] = {
+      tier,
+      tier_name: payload.tier_name,
+      amount: payload.amount,
+      currency: payload.currency,
+      starts_at: now,
+      ends_at: endsAt,
+      message_id: payload.message_id,
+      from_name: payload.from_name,
+    };
+    if (isNew) {
+      next.tierCounts[tier] = (next.tierCounts[tier] || 0) + 1;
+    }
+  };
+
+  const removeSubscription = () => {
+    delete next.subscriptions[payload.from_name];
+    if (next.tierCounts[tier] != null) {
+      next.tierCounts[tier] = Math.max(0, next.tierCounts[tier] - 1);
+    }
+    next.cancellations.push({
+      from_name: payload.from_name,
+      tier,
+      message_id: payload.message_id,
+      timestamp: now,
+    });
+  };
+
+  switch (kind) {
+    case "donation":
+      next.donors.push({
+        from_name: payload.from_name,
+        amount: payload.amount,
+        currency: payload.currency,
+        message: payload.message,
+        message_id: payload.message_id,
+        timestamp: now,
+      });
+      break;
+    case "subscription_start":
+      addOrUpdateSubscription(true);
+      break;
+    case "subscription_renewal":
+      addOrUpdateSubscription(false);
+      break;
+    case "cancellation":
+      removeSubscription();
+      break;
+    case "refund":
+      next.refunds.push({
+        from_name: payload.from_name,
+        amount: payload.amount,
+        currency: payload.currency,
+        message_id: payload.message_id,
+        timestamp: now,
+      });
+      break;
+    default:
+      break;
+  }
+
+  return next;
+}
+
+// ============ HANDLER ============
+
+export default async function handler(
+  req: VercelRequest,
+  res: VercelResponse
+) {
   if (req.method !== "POST") {
     return res
       .status(405)
@@ -146,6 +474,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const kofiUsername = process.env.KOFI_USERNAME;
   const gistUrl = process.env.GIST_URL;
+  const gistIdEnv = process.env.GIST_ID;
   const gistToken = process.env.GIST_TOKEN;
 
   const data = req.body?.data;
@@ -172,8 +501,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   payload.kofi_transaction_id = CENSOR;
   payload.shipping = null;
 
+  const kind = getEventKind(payload);
+  const discordBody = buildComponentsV2Message(payload, kind, kofiUsername);
+  const targetWebhook = getWebhookForEvent(kind, {
+    WEBHOOK_URL: webhookUrl,
+    WEBHOOK_SUBSCRIPTIONS: process.env.WEBHOOK_SUBSCRIPTIONS,
+    WEBHOOK_DONATIONS: process.env.WEBHOOK_DONATIONS,
+    WEBHOOK_ALERTS: process.env.WEBHOOK_ALERTS,
+  });
+
   try {
-    await sendDiscordEmbed(webhookUrl, payload, kofiUsername);
+    await sendToDiscord(targetWebhook, discordBody);
   } catch (err) {
     console.error(err);
     return res.status(500).json({
@@ -182,26 +520,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  console.log(`Processed payload ${payload.message_id}.`);
+  console.log(`Processed ${kind} payload ${payload.message_id}.`);
 
-  if (!gistUrl || !gistToken) {
-    return res.status(200).json({ success: true });
-  }
-
-  try {
-    const gistRes = await fetch(gistUrl);
-    if (gistRes.status === 404) {
-      throw new Error("Gist not found.");
+  // Atualizar Gist se configurado
+  if (gistToken && (gistUrl || gistIdEnv)) {
+    try {
+      const id = getGistId(gistUrl, gistIdEnv);
+      const gistData = await loadGistData(id, gistToken);
+      const updated = applyPayloadToData(gistData, payload, kind);
+      await saveGistData(id, gistToken, updated);
+    } catch (err) {
+      console.error("Gist update failed:", err);
+      // Não falha a requisição, só loga
     }
-    const supporters: KoFiPayload[] = gistRes.ok ? await gistRes.json() : [];
-    supporters.push(payload);
-    await updateGist(gistUrl, gistToken, supporters, payload.message_id);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      error: err instanceof Error ? err.message : "Gist update failed",
-    });
   }
 
   return res.status(200).json({ success: true });
