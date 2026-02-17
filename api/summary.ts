@@ -100,9 +100,47 @@ function buildSummaryMessage(data: KoFiData): { flags: number; components: unkno
             components: [{ type: 10, content: "Resumo de apoiadores" }],
             accessory: { type: 11, media: { url: KOFI_IMG } },
           },
-          { type: 10, content: "" },
           { type: 10, content },
         ],
+      },
+    ],
+  };
+}
+
+function buildLegacyEmbedSummary(data: KoFiData): { embeds: unknown[] } {
+  const lines: string[] = [];
+  const tierEntries = Object.entries(data.tierCounts || {}).filter(
+    ([_, c]) => c > 0
+  );
+  const totalSubs = tierEntries.reduce((s, [, c]) => s + c, 0);
+
+  lines.push(`**Subscriptions ativas:** ${totalSubs}`);
+  tierEntries.forEach(([tier, count]) => {
+    lines.push(`• ${tier}: ${count}`);
+  });
+
+  const subList = Object.entries(data.subscriptions || {});
+  if (subList.length > 0) {
+    lines.push("\n**Por usuário:**");
+    subList.slice(0, 10).forEach(([name, entry]) => {
+      lines.push(`• ${name} (${entry.tier_name || entry.tier}) → ${formatTimeUntil(entry.ends_at)}`);
+    });
+  }
+
+  const donors = (data.donors || []).slice(-5).reverse();
+  if (donors.length > 0) {
+    lines.push("\n**Últimas doações:**");
+    donors.forEach((d) => lines.push(`• ${d.from_name}: ${d.amount} ${d.currency}`));
+  }
+
+  return {
+    embeds: [
+      {
+        title: "📊 Resumo Ko-fi",
+        description: lines.join("\n") || "Nenhum dado ainda.",
+        color: 0x9b59b6,
+        thumbnail: { url: KOFI_IMG },
+        timestamp: new Date().toISOString(),
       },
     ],
   };
@@ -199,12 +237,23 @@ export default async function handler(
         };
 
     const body = buildSummaryMessage(data);
-    const url = webhookUrlWithComponents(webhookSummary);
-    const discordRes = await fetch(url, {
+    const legacyBody = buildLegacyEmbedSummary(data);
+    const urlWithComponents = webhookUrlWithComponents(webhookSummary);
+    const urlNormal = webhookSummary.replace(/\?.*$/, "");
+
+    let discordRes = await fetch(urlWithComponents, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+
+    if (discordRes.status === 400) {
+      discordRes = await fetch(urlNormal, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(legacyBody),
+      });
+    }
 
     if (!discordRes.ok) {
       const text = await discordRes.text();

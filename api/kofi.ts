@@ -254,7 +254,67 @@ function buildComponentsV2Message(
 
   return {
     flags: IS_COMPONENTS_V2,
-    components: [headerSection, textDisplay(""), mainContainer],
+    components: [headerSection, mainContainer],
+  };
+}
+
+/** Embed legado (fallback quando Components V2 falha) */
+function buildLegacyEmbed(
+  payload: KoFiPayload,
+  kind: EventKind,
+  kofiUsername?: string
+): { embeds: unknown[] } {
+  const color = tierColor(payload.tier_name);
+  const kofiLink = kofiUsername
+    ? `https://ko-fi.com/${kofiUsername}`
+    : "https://ko-fi.com";
+
+  let title: string;
+  switch (kind) {
+    case "donation":
+      title = "☕ Nova doação no Ko-fi!";
+      break;
+    case "subscription_start":
+      title = "✨ Nova subscription!";
+      break;
+    case "subscription_renewal":
+      title = "🔄 Renovação de subscription";
+      break;
+    case "cancellation":
+      title = "❌ Subscription cancelada";
+      break;
+    case "refund":
+      title = "💰 Pedido de reembolso";
+      break;
+    default:
+      title = "📬 Nova notificação Ko-fi";
+  }
+
+  const fields = [
+    { name: "De", value: payload.from_name, inline: true },
+    { name: "Tipo", value: payload.type, inline: true },
+    { name: "Valor", value: `${payload.amount} ${payload.currency}`, inline: true },
+  ];
+  if (payload.tier_name) {
+    fields.push({ name: "Tier", value: payload.tier_name, inline: false });
+  }
+  if (payload.message && payload.message !== "null") {
+    fields.push({ name: "Mensagem", value: payload.message, inline: false });
+  }
+
+  return {
+    embeds: [
+      {
+        author: { name: "Ko-fi", icon_url: KOFI_IMG },
+        title,
+        url: kofiLink,
+        color,
+        fields,
+        thumbnail: { url: KOFI_IMG },
+        footer: { text: "Thank you for supporting!", icon_url: KOFI_IMG },
+        timestamp: new Date().toISOString(),
+      },
+    ],
   };
 }
 
@@ -262,19 +322,37 @@ function buildComponentsV2Message(
 
 async function sendToDiscord(
   webhookUrl: string,
-  body: { flags: number; components: unknown[] }
+  payload: KoFiPayload,
+  kind: EventKind,
+  kofiUsername?: string
 ): Promise<void> {
-  const url = webhookUrlWithComponents(webhookUrl);
-  const res = await fetch(url, {
+  const cv2Body = buildComponentsV2Message(payload, kind, kofiUsername);
+  const legacyBody = buildLegacyEmbed(payload, kind, kofiUsername);
+
+  const urlWithComponents = webhookUrlWithComponents(webhookUrl);
+  const urlNormal = webhookUrl.replace(/\?.*$/, "");
+
+  const res = await fetch(urlWithComponents, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(cv2Body),
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Discord webhook failed: ${res.status} ${text}`);
+  if (res.ok) return;
+
+  if (res.status === 400) {
+    const fallbackRes = await fetch(urlNormal, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(legacyBody),
+    });
+    if (fallbackRes.ok) return;
+    const text = await fallbackRes.text();
+    throw new Error(`Discord webhook failed (fallback): ${fallbackRes.status} ${text}`);
   }
+
+  const text = await res.text();
+  throw new Error(`Discord webhook failed: ${res.status} ${text}`);
 }
 
 /** Escolhe webhook com base no evento. Fallback para WEBHOOK_URL. */
@@ -502,7 +580,6 @@ export default async function handler(
   payload.shipping = null;
 
   const kind = getEventKind(payload);
-  const discordBody = buildComponentsV2Message(payload, kind, kofiUsername);
   const targetWebhook = getWebhookForEvent(kind, {
     WEBHOOK_URL: webhookUrl,
     WEBHOOK_SUBSCRIPTIONS: process.env.WEBHOOK_SUBSCRIPTIONS,
@@ -511,7 +588,7 @@ export default async function handler(
   });
 
   try {
-    await sendToDiscord(targetWebhook, discordBody);
+    await sendToDiscord(targetWebhook, payload, kind, kofiUsername);
   } catch (err) {
     console.error(err);
     return res.status(500).json({
